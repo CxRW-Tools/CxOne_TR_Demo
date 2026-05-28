@@ -208,42 +208,6 @@ if __name__ == '__main__':
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def get_account_type(target_org: str) -> str:
-    """Return 'User' or 'Organization' for the given GitHub account name."""
-    try:
-        account = gh_api("GET", f"users/{target_org}")
-        return account.get("type", "Organization")
-    except FileNotFoundError:
-        print("Error: gh CLI not found. Install it from https://cli.github.com/ and run 'gh auth login'.", file=sys.stderr)
-        sys.exit(1)
-    except RuntimeError:
-        print(f"Error: GitHub account '{target_org}' not found. Check the account name and that gh is authenticated.", file=sys.stderr)
-        sys.exit(1)
-
-
-def check_org_access(target_org: str, account_type: str) -> None:
-    """Verify the authenticated user can create repos in the target account."""
-    try:
-        user = gh_api("GET", "user")
-        username = user.get("login", "unknown")
-    except RuntimeError:
-        username = "unknown"
-
-    if account_type == "User":
-        if username.lower() != target_org.lower():
-            print(f"Error: '{username}' cannot create repos in '{target_org}' — you can only target your own account.", file=sys.stderr)
-            sys.exit(1)
-    else:
-        try:
-            membership = gh_api("GET", f"user/memberships/orgs/{target_org}")
-            if membership.get("state") == "pending":
-                print(f"Error: Your membership in '{target_org}' is pending — accept the GitHub invite before running this script.", file=sys.stderr)
-                sys.exit(1)
-        except RuntimeError:
-            print(f"Error: '{username}' does not appear to be a member of the '{target_org}' org. Verify your account has access.", file=sys.stderr)
-            sys.exit(1)
-
-
 def gh_api(method: str, endpoint: str, body: dict | None = None) -> dict:
     cmd = ["gh", "api", "-X", method, endpoint]
     inp = None
@@ -270,6 +234,14 @@ def gh_api(method: str, endpoint: str, body: dict | None = None) -> dict:
     return json.loads(r.stdout) if r.stdout.strip() else {}
 
 
+def run_gh(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    cmd = ["gh", *args]
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"gh {' '.join(args)} failed: {r.stderr or r.stdout}")
+    return r
+
+
 def run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     cmd = ["git", *args]
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
@@ -278,9 +250,60 @@ def run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedPr
     return r
 
 
+def get_authenticated_username() -> str:
+    """Return the login of the currently authenticated gh user. Doubles as an auth check."""
+    try:
+        user = gh_api("GET", "user")
+    except FileNotFoundError:
+        print("Error: gh CLI not found. Install it from https://cli.github.com/ and run 'gh auth login'.", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError:
+        print("Error: gh is not authenticated. Run 'gh auth login' first.", file=sys.stderr)
+        sys.exit(1)
+    return user.get("login", "unknown")
+
+
+def get_account_type(target_owner: str) -> str:
+    """Return 'User' or 'Organization' for the given GitHub account name."""
+    try:
+        account = gh_api("GET", f"users/{target_owner}")
+    except RuntimeError:
+        print(f"Error: GitHub account '{target_owner}' not found.", file=sys.stderr)
+        sys.exit(1)
+    return account.get("type", "Organization")
+
+
+def check_repo_does_not_exist(target_owner: str, repo_name: str) -> None:
+    """Exit if the target repo already exists, to avoid a cryptic failure mid-run."""
+    try:
+        gh_api("GET", f"repos/{target_owner}/{repo_name}")
+    except RuntimeError:
+        return  # repo doesn't exist — good
+    print(f"Error: '{target_owner}/{repo_name}' already exists. Pick a different name or delete the existing repo first.", file=sys.stderr)
+    sys.exit(1)
+
+
+def check_org_access(target_owner: str, account_type: str, username: str) -> None:
+    """Verify the authenticated user can create repos in the target account."""
+    if account_type == "User":
+        if username.lower() != target_owner.lower():
+            print(f"Error: '{username}' cannot create repos in '{target_owner}' — you can only target your own account.", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    try:
+        membership = gh_api("GET", f"user/memberships/orgs/{target_owner}")
+    except RuntimeError:
+        print(f"Error: '{username}' does not appear to be a member of the '{target_owner}' org. Verify your account has access.", file=sys.stderr)
+        sys.exit(1)
+    if membership.get("state") == "pending":
+        print(f"Error: Your membership in '{target_owner}' is pending — accept the GitHub invite before running this script.", file=sys.stderr)
+        sys.exit(1)
+
+
 # ── core steps ────────────────────────────────────────────────────────────────
 
-def create_repo(target_org: str, repo_name: str, account_type: str) -> None:
+def create_repo(target_owner: str, repo_name: str, account_type: str) -> None:
     source = gh_api("GET", f"repos/{SOURCE_REPO}")
     body = {
         "name": repo_name,
@@ -291,18 +314,13 @@ def create_repo(target_org: str, repo_name: str, account_type: str) -> None:
     if account_type == "User":
         gh_api("POST", "user/repos", body=body)
     else:
-        gh_api("POST", f"orgs/{target_org}/repos", body=body)
-    print(f"  Created repo: {target_org}/{repo_name}")
+        gh_api("POST", f"orgs/{target_owner}/repos", body=body)
+    print(f"  Created repo: {target_owner}/{repo_name}")
 
 
-def clone_and_push(target_org: str, repo_name: str, workdir: Path) -> str:
+def clone_and_push(target_owner: str, repo_name: str, workdir: Path) -> str:
     """Clone source into workdir and push to the new repo. Returns default branch name."""
-    r = subprocess.run(
-        ["gh", "repo", "clone", SOURCE_REPO, ".", "--", "--depth", "1"],
-        cwd=workdir, capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"gh repo clone failed: {r.stderr or r.stdout}")
+    run_gh("repo", "clone", SOURCE_REPO, ".", "--", "--depth", "1", cwd=workdir)
 
     run_git(workdir, "fetch", "origin", "--unshallow")
     default_branch = run_git(workdir, "rev-parse", "--abbrev-ref", "origin/HEAD").stdout.strip()
@@ -315,17 +333,17 @@ def clone_and_push(target_org: str, repo_name: str, workdir: Path) -> str:
         run_git(workdir, "commit", "-m", "chore: remove workflow files")
         print("  Removed .github/workflows before push")
 
-    url = f"https://github.com/{target_org}/{repo_name}.git"
+    url = f"https://github.com/{target_owner}/{repo_name}.git"
     run_git(workdir, "remote", "add", "target", url)
     run_git(workdir, "push", "target", f"HEAD:refs/heads/{default_branch}")
     run_git(workdir, "remote", "remove", "target")
-    print(f"  Pushed to {target_org}/{repo_name}")
+    print(f"  Pushed to {target_owner}/{repo_name}")
     return default_branch
 
 
-def apply_and_pr(target_org: str, repo_name: str, default_branch: str, workdir: Path) -> str | None:
+def apply_and_pr(target_owner: str, repo_name: str, default_branch: str, workdir: Path) -> str | None:
     """Create branch, write hardcoded changes, commit, push, open PR. Returns PR URL or None."""
-    url = f"https://github.com/{target_org}/{repo_name}.git"
+    url = f"https://github.com/{target_owner}/{repo_name}.git"
 
     run_git(workdir, "checkout", "-B", default_branch, f"origin/{default_branch}")
     run_git(workdir, "reset", "--hard")
@@ -353,7 +371,7 @@ def apply_and_pr(target_org: str, repo_name: str, default_branch: str, workdir: 
     run_git(workdir, "push", "target", BRANCH_NAME)
     run_git(workdir, "remote", "remove", "target")
 
-    pr = gh_api("POST", f"repos/{target_org}/{repo_name}/pulls", body={
+    pr = gh_api("POST", f"repos/{target_owner}/{repo_name}/pulls", body={
         "title": PR_TITLE,
         "body": PR_BODY,
         "head": BRANCH_NAME,
@@ -366,41 +384,45 @@ def apply_and_pr(target_org: str, repo_name: str, default_branch: str, workdir: 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Clone ProjectHub-TR into a target org/repo, apply hardcoded changes, open PR."
+        description="Clone ProjectHub-TR into a target owner/repo, apply hardcoded changes, open PR."
     )
     parser.add_argument(
         "target",
-        metavar="org/repo",
-        help="Target repository in the format <org>/<repo> (e.g. CxRW/my-project)",
+        metavar="owner/repo",
+        help="Target repository in the format <owner>/<repo> (e.g. CxRW/my-project)",
     )
     args = parser.parse_args()
 
     if "/" not in args.target or args.target.count("/") != 1:
-        parser.error("target must be in the format <org>/<repo>")
-    target_org, repo_name = args.target.split("/", 1)
+        parser.error("target must be in the format <owner>/<repo>")
+    target_owner, repo_name = args.target.split("/", 1)
 
-    account_type = get_account_type(target_org)
-    check_org_access(target_org, account_type)
+    username = get_authenticated_username()
+    account_type = get_account_type(target_owner)
+    check_repo_does_not_exist(target_owner, repo_name)
+    check_org_access(target_owner, account_type, username)
 
     print(f"Source:  {SOURCE_REPO}")
-    print(f"Target:  {target_org}/{repo_name}")
+    print(f"Target:  {target_owner}/{repo_name}")
     print(f"Branch:  {BRANCH_NAME}")
     print(f"PR:      {PR_TITLE!r}")
     print()
 
+    repo_created = False
     try:
         print("Creating target repo...")
-        create_repo(target_org, repo_name, account_type)
+        create_repo(target_owner, repo_name, account_type)
+        repo_created = True
 
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
 
             print("Cloning source and pushing to target repo...")
-            default_branch = clone_and_push(target_org, repo_name, workdir)
+            default_branch = clone_and_push(target_owner, repo_name, workdir)
             print(f"Default branch: {default_branch}")
 
             print()
-            print(f"Import {target_org}/{repo_name} into Checkmarx One using Code Repository Integration:")
+            print(f"Import {target_owner}/{repo_name} into Checkmarx One using Code Repository Integration:")
             print(f"  Enable Push/PR scan trigger, PR Decoration, and AI Triage & Remediation")
             print(f"  Scan {default_branch} branch on project creation")
             print("  Waiting ", end="", flush=True)
@@ -417,15 +439,22 @@ def main() -> int:
                 print("Aborted.")
                 return 0
 
-            print(f"\nApplying changes to {target_org}/{repo_name}...")
-            pr_url = apply_and_pr(target_org, repo_name, default_branch, workdir)
+            print(f"\nApplying changes to {target_owner}/{repo_name}...")
+            pr_url = apply_and_pr(target_owner, repo_name, default_branch, workdir)
             if pr_url:
                 print(f"  PR opened: {pr_url}")
             else:
                 print("  No changes detected; PR skipped.")
 
+    except KeyboardInterrupt:
+        print("\nAborted by user.", file=sys.stderr)
+        if repo_created:
+            print(f"Note: '{target_owner}/{repo_name}' was created but the script did not complete. Delete it manually before retrying.", file=sys.stderr)
+        return 130
     except RuntimeError as e:
         print(f"\nError: {e}", file=sys.stderr)
+        if repo_created:
+            print(f"Note: '{target_owner}/{repo_name}' was created but the script did not complete. Delete it manually before retrying.", file=sys.stderr)
         return 1
 
     return 0
