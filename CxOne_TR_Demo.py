@@ -219,22 +219,37 @@ def check_gh_auth() -> None:
         sys.exit(1)
 
 
-def check_org_access(target_org: str) -> None:
-    """Verify the authenticated user is a member of target_org with a useful error if not."""
+def get_account_type(target_org: str) -> str:
+    """Return 'User' or 'Organization' for the given GitHub account name."""
+    try:
+        account = gh_api("GET", f"users/{target_org}")
+        return account.get("type", "Organization")
+    except RuntimeError:
+        print(f"Error: GitHub account '{target_org}' not found.", file=sys.stderr)
+        sys.exit(1)
+
+
+def check_org_access(target_org: str, account_type: str) -> None:
+    """Verify the authenticated user can create repos in the target account."""
     try:
         user = gh_api("GET", "user")
         username = user.get("login", "unknown")
     except RuntimeError:
         username = "unknown"
 
-    try:
-        membership = gh_api("GET", f"user/memberships/orgs/{target_org}")
-        if membership.get("state") == "pending":
-            print(f"Error: Your membership in '{target_org}' is pending — accept the GitHub invite before running this script.", file=sys.stderr)
+    if account_type == "User":
+        if username.lower() != target_org.lower():
+            print(f"Error: '{username}' cannot create repos in '{target_org}' — you can only target your own account.", file=sys.stderr)
             sys.exit(1)
-    except RuntimeError:
-        print(f"Error: '{username}' does not appear to be a member of the '{target_org}' org. Verify your account has access.", file=sys.stderr)
-        sys.exit(1)
+    else:
+        try:
+            membership = gh_api("GET", f"user/memberships/orgs/{target_org}")
+            if membership.get("state") == "pending":
+                print(f"Error: Your membership in '{target_org}' is pending — accept the GitHub invite before running this script.", file=sys.stderr)
+                sys.exit(1)
+        except RuntimeError:
+            print(f"Error: '{username}' does not appear to be a member of the '{target_org}' org. Verify your account has access.", file=sys.stderr)
+            sys.exit(1)
 
 
 def gh_api(method: str, endpoint: str, body: dict | None = None) -> dict:
@@ -273,14 +288,18 @@ def run_git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedPr
 
 # ── core steps ────────────────────────────────────────────────────────────────
 
-def create_repo(target_org: str, repo_name: str) -> None:
+def create_repo(target_org: str, repo_name: str, account_type: str) -> None:
     source = gh_api("GET", f"repos/{SOURCE_REPO}")
-    gh_api("POST", f"orgs/{target_org}/repos", body={
+    body = {
         "name": repo_name,
         "description": f"Clone of {SOURCE_REPO}",
         "private": source["private"],
         "auto_init": False,
-    })
+    }
+    if account_type == "User":
+        gh_api("POST", "user/repos", body=body)
+    else:
+        gh_api("POST", f"orgs/{target_org}/repos", body=body)
     print(f"  Created repo: {target_org}/{repo_name}")
 
 
@@ -369,7 +388,8 @@ def main() -> int:
     target_org, repo_name = args.target.split("/", 1)
 
     check_gh_auth()
-    check_org_access(target_org)
+    account_type = get_account_type(target_org)
+    check_org_access(target_org, account_type)
 
     print(f"Source:  {SOURCE_REPO}")
     print(f"Target:  {target_org}/{repo_name}")
@@ -379,7 +399,7 @@ def main() -> int:
 
     try:
         print("Creating target repo...")
-        create_repo(target_org, repo_name)
+        create_repo(target_org, repo_name, account_type)
 
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
