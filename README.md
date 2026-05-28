@@ -25,11 +25,6 @@ python CxOne_TR_Demo.py <org>/<repo>
 python CxOne_TR_Demo.py MyOrg/ProjectHub
 ```
 
-| Flag | Description |
-|------|-------------|
-| *(none)* | Full run: create repo, onboard reminder, then branch + PR |
-| `--dry-run` | Create and push the repo only — skip the branch and PR step |
-
 ## What to expect
 
 1. The script creates the target repo in the specified GitHub org and pushes the demo codebase.

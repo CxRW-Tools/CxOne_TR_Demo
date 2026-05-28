@@ -219,6 +219,24 @@ def check_gh_auth() -> None:
         sys.exit(1)
 
 
+def check_org_access(target_org: str) -> None:
+    """Verify the authenticated user is a member of target_org with a useful error if not."""
+    try:
+        user = gh_api("GET", "user")
+        username = user.get("login", "unknown")
+    except RuntimeError:
+        username = "unknown"
+
+    try:
+        membership = gh_api("GET", f"user/memberships/orgs/{target_org}")
+        if membership.get("state") == "pending":
+            print(f"Error: Your membership in '{target_org}' is pending — accept the GitHub invite before running this script.", file=sys.stderr)
+            sys.exit(1)
+    except RuntimeError:
+        print(f"Error: '{username}' does not appear to be a member of the '{target_org}' org. Verify your account has access.", file=sys.stderr)
+        sys.exit(1)
+
+
 def gh_api(method: str, endpoint: str, body: dict | None = None) -> dict:
     cmd = ["gh", "api", "-X", method, endpoint]
     inp = None
@@ -344,11 +362,6 @@ def main() -> int:
         metavar="org/repo",
         help="Target repository in the format <org>/<repo> (e.g. CxRW/my-project)",
     )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Create the repo and push contents; skip the branch/changes/PR step",
-    )
     args = parser.parse_args()
 
     if "/" not in args.target or args.target.count("/") != 1:
@@ -356,6 +369,7 @@ def main() -> int:
     target_org, repo_name = args.target.split("/", 1)
 
     check_gh_auth()
+    check_org_access(target_org)
 
     print(f"Source:  {SOURCE_REPO}")
     print(f"Target:  {target_org}/{repo_name}")
@@ -373,10 +387,6 @@ def main() -> int:
             print("Cloning source and pushing to target repo...")
             default_branch = clone_and_push(target_org, repo_name, workdir)
             print(f"Default branch: {default_branch}")
-
-            if args.dry_run:
-                print("\nDry run complete — skipping branch/changes/PR step.")
-                return 0
 
             print()
             print(f"Import {target_org}/{repo_name} into Checkmarx One using Code Repository Integration:")
