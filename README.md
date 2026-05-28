@@ -22,7 +22,7 @@ python CxOne_TR_Demo.py <org>/<repo>
 **Example:**
 
 ```powershell
-python CxOne_TR_Demo.py CxRW/ProjectHub2026
+python CxOne_TR_Demo.py MyOrg/ProjectHub
 ```
 
 | Flag | Description |
@@ -37,7 +37,7 @@ python CxOne_TR_Demo.py CxRW/ProjectHub2026
 2. It prints a reminder to import the repo into Checkmarx One before the PR scan fires:
 
    ```
-   Import CxRW/ProjectHub2026 into Checkmarx One using Code Repository Integration:
+   Import MyOrg/ProjectHub into Checkmarx One using Code Repository Integration:
      Enable Push/PR scan trigger, PR Decoration, and AI Triage & Remediation
      Scan main branch on project creation
    ```
