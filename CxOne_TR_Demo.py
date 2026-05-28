@@ -208,24 +208,16 @@ if __name__ == '__main__':
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def check_gh_auth() -> None:
-    try:
-        gh_api("GET", "user")
-    except FileNotFoundError:
-        print("Error: gh CLI not found. Install it from https://cli.github.com/ and run 'gh auth login'.", file=sys.stderr)
-        sys.exit(1)
-    except RuntimeError:
-        print("Error: gh is not authenticated. Run 'gh auth login' first.", file=sys.stderr)
-        sys.exit(1)
-
-
 def get_account_type(target_org: str) -> str:
     """Return 'User' or 'Organization' for the given GitHub account name."""
     try:
         account = gh_api("GET", f"users/{target_org}")
         return account.get("type", "Organization")
+    except FileNotFoundError:
+        print("Error: gh CLI not found. Install it from https://cli.github.com/ and run 'gh auth login'.", file=sys.stderr)
+        sys.exit(1)
     except RuntimeError:
-        print(f"Error: GitHub account '{target_org}' not found.", file=sys.stderr)
+        print(f"Error: GitHub account '{target_org}' not found. Check the account name and that gh is authenticated.", file=sys.stderr)
         sys.exit(1)
 
 
@@ -387,7 +379,6 @@ def main() -> int:
         parser.error("target must be in the format <org>/<repo>")
     target_org, repo_name = args.target.split("/", 1)
 
-    check_gh_auth()
     account_type = get_account_type(target_org)
     check_org_access(target_org, account_type)
 
