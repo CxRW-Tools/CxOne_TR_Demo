@@ -210,11 +210,11 @@ if __name__ == '__main__':
 
 def check_gh_auth() -> None:
     try:
-        r = subprocess.run(["gh", "api", "user"], capture_output=True, text=True)
+        gh_api("GET", "user")
     except FileNotFoundError:
         print("Error: gh CLI not found. Install it from https://cli.github.com/ and run 'gh auth login'.", file=sys.stderr)
         sys.exit(1)
-    if r.returncode != 0:
+    except RuntimeError:
         print("Error: gh is not authenticated. Run 'gh auth login' first.", file=sys.stderr)
         sys.exit(1)
 
