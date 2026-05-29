@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-CxOne_TR_Demo: creates one copy of CxRW-Templates/ProjectHub-TR in a
-target org under the given repo name, pushes its contents, then branches,
-applies hardcoded changes, and opens a pull request.
+CxOne_TR_Demo: creates one or more copies of CxRW-Templates/ProjectHub-TR in
+target orgs/accounts under the given repo names, pushes their contents, then
+branches, applies hardcoded changes, and opens a pull request for each.
 
 Usage:
-  python CxOne_TR_Demo.py <org>/<repo>
+  python CxOne_TR_Demo.py <owner>/<repo>[,<owner>/<repo>,...]
+
+Examples:
+  python CxOne_TR_Demo.py CxRW/my-project
+  python CxOne_TR_Demo.py CxRW/repo1,CxRW/repo2,other-org/repo3
 
 Requires: gh CLI authenticated (run 'gh auth login' first)
 """
@@ -382,79 +386,141 @@ def apply_and_pr(target_owner: str, repo_name: str, default_branch: str, workdir
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
+def parse_targets(raw: str) -> list[tuple[str, str]]:
+    """Parse a comma-separated list of owner/repo strings into (owner, repo) tuples."""
+    targets = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "/" not in token or token.count("/") != 1:
+            print(f"Error: '{token}' is not in the required <owner>/<repo> format.", file=sys.stderr)
+            sys.exit(1)
+        owner, repo = token.split("/", 1)
+        if not owner or not repo:
+            print(f"Error: '{token}' has an empty owner or repo name.", file=sys.stderr)
+            sys.exit(1)
+        targets.append((owner, repo))
+    if not targets:
+        print("Error: no valid targets provided.", file=sys.stderr)
+        sys.exit(1)
+    return targets
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Clone ProjectHub-TR into a target owner/repo, apply hardcoded changes, open PR."
+        description=(
+            "Clone ProjectHub-TR into one or more target repos, apply hardcoded changes, and open a PR for each. "
+            "Targets are provided as a comma-separated list of <owner>/<repo> pairs."
+        )
     )
     parser.add_argument(
-        "target",
-        metavar="owner/repo",
-        help="Target repository in the format <owner>/<repo> (e.g. CxRW/my-project)",
+        "targets",
+        metavar="owner/repo[,owner/repo,...]",
+        help="One or more target repositories in <owner>/<repo> format, comma-separated (e.g. CxRW/repo1,CxRW/repo2)",
     )
     args = parser.parse_args()
 
-    if "/" not in args.target or args.target.count("/") != 1:
-        parser.error("target must be in the format <owner>/<repo>")
-    target_owner, repo_name = args.target.split("/", 1)
+    targets = parse_targets(args.targets)
 
     username = get_authenticated_username()
-    account_type = get_account_type(target_owner)
-    check_repo_does_not_exist(target_owner, repo_name)
-    check_org_access(target_owner, account_type, username)
 
-    print(f"Source:  {SOURCE_REPO}")
-    print(f"Target:  {target_owner}/{repo_name}")
-    print(f"Branch:  {BRANCH_NAME}")
-    print(f"PR:      {PR_TITLE!r}")
+    # ── preflight: validate all targets before doing any work ────────────────
+    print("Running preflight checks...")
+    account_types: dict[tuple[str, str], str] = {}
+    for target_owner, repo_name in targets:
+        account_type = get_account_type(target_owner)
+        check_repo_does_not_exist(target_owner, repo_name)
+        check_org_access(target_owner, account_type, username)
+        account_types[(target_owner, repo_name)] = account_type
+    print("  All targets OK.")
     print()
 
-    repo_created = False
+    print(f"Source:   {SOURCE_REPO}")
+    print(f"Targets:  {', '.join(f'{o}/{r}' for o, r in targets)}")
+    print(f"Branch:   {BRANCH_NAME}")
+    print(f"PR:       {PR_TITLE!r}")
+    print()
+
+    created_repos: list[str] = []
+    default_branches: dict[tuple[str, str], str] = {}
+
     try:
-        print("Creating target repo...")
-        create_repo(target_owner, repo_name, account_type)
-        repo_created = True
+        # ── phase 1: create and push all repos ───────────────────────────────
+        for target_owner, repo_name in targets:
+            tag = f"[{target_owner}/{repo_name}]"
+            account_type = account_types[(target_owner, repo_name)]
 
-        with tempfile.TemporaryDirectory() as tmp:
-            workdir = Path(tmp)
+            print(f"{tag} Creating repo...")
+            create_repo(target_owner, repo_name, account_type)
+            created_repos.append(f"{target_owner}/{repo_name}")
 
-            print("Cloning source and pushing to target repo...")
-            default_branch = clone_and_push(target_owner, repo_name, workdir)
-            print(f"Default branch: {default_branch}")
-
+            with tempfile.TemporaryDirectory() as tmp:
+                workdir = Path(tmp)
+                print(f"{tag} Cloning source and pushing to target repo...")
+                default_branch = clone_and_push(target_owner, repo_name, workdir)
+                default_branches[(target_owner, repo_name)] = default_branch
+                print(f"{tag} Default branch: {default_branch}")
             print()
-            print(f"Import {target_owner}/{repo_name} into Checkmarx One using Code Repository Integration:")
-            print(f"  Enable Push/PR scan trigger, PR Decoration, and AI Triage & Remediation")
-            print(f"  Scan {default_branch} branch on project creation")
-            print("  Waiting ", end="", flush=True)
-            for _ in range(30):
-                time.sleep(2)
-                print(".", end="", flush=True)
-            print()
-            print()
-            try:
-                reply = input("Proceed with creating branch, applying changes, and opening PR? [y/N]: ").strip().lower()
-            except EOFError:
-                reply = "n"
-            if reply not in ("y", "yes"):
-                print("Aborted.")
-                return 0
 
-            print(f"\nApplying changes to {target_owner}/{repo_name}...")
-            pr_url = apply_and_pr(target_owner, repo_name, default_branch, workdir)
+        # ── phase 2: shared pause for CxOne import ───────────────────────────
+        print("Import the following repos into Checkmarx One using Code Repository Integration:")
+        for target_owner, repo_name in targets:
+            branch = default_branches[(target_owner, repo_name)]
+            print(f"  {target_owner}/{repo_name}  (default branch: {branch})")
+        print()
+        print("For each repo:")
+        print("  - Enable Push/PR scan trigger, PR Decoration, and AI Triage & Remediation")
+        print("  - Scan the default branch on project creation")
+        print()
+        print("Waiting ", end="", flush=True)
+        for _ in range(30):
+            time.sleep(2)
+            print(".", end="", flush=True)
+        print()
+        print()
+
+        try:
+            reply = input("Proceed with creating branches, applying changes, and opening PRs? [y/N]: ").strip().lower()
+        except EOFError:
+            reply = "n"
+        if reply not in ("y", "yes"):
+            print("Aborted.")
+            return 0
+
+        # ── phase 3: apply changes and open PRs for all repos ────────────────
+        pr_urls: list[tuple[str, str | None]] = []
+        for target_owner, repo_name in targets:
+            tag = f"[{target_owner}/{repo_name}]"
+            default_branch = default_branches[(target_owner, repo_name)]
+
+            print(f"\n{tag} Applying changes...")
+            with tempfile.TemporaryDirectory() as tmp:
+                workdir = Path(tmp)
+                run_gh("repo", "clone", SOURCE_REPO, ".", "--", "--depth", "1", cwd=workdir)
+                run_git(workdir, "fetch", "origin", "--unshallow")
+                pr_url = apply_and_pr(target_owner, repo_name, default_branch, workdir)
+            pr_urls.append((f"{target_owner}/{repo_name}", pr_url))
+
+        print()
+        print("Done.")
+        for repo_slug, pr_url in pr_urls:
             if pr_url:
-                print(f"  PR opened: {pr_url}")
+                print(f"  {repo_slug}: PR opened: {pr_url}")
             else:
-                print("  No changes detected; PR skipped.")
+                print(f"  {repo_slug}: No changes detected; PR skipped.")
 
     except KeyboardInterrupt:
         print("\nAborted by user.", file=sys.stderr)
-        if repo_created:
-            print(f"Note: '{target_owner}/{repo_name}' was created but the script did not complete. Delete it manually before retrying.", file=sys.stderr)
+        if created_repos:
+            repos_list = ", ".join(f"'{r}'" for r in created_repos)
+            print(f"Note: the following repos were created but the script did not complete. Delete them manually before retrying: {repos_list}", file=sys.stderr)
         return 130
     except RuntimeError as e:
         print(f"\nError: {e}", file=sys.stderr)
-        if repo_created:
-            print(f"Note: '{target_owner}/{repo_name}' was created but the script did not complete. Delete it manually before retrying.", file=sys.stderr)
+        if created_repos:
+            repos_list = ", ".join(f"'{r}'" for r in created_repos)
+            print(f"Note: the following repos were created but the script did not complete. Delete them manually before retrying: {repos_list}", file=sys.stderr)
         return 1
 
     return 0
