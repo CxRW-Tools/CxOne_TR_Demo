@@ -6,10 +6,13 @@ branches, applies hardcoded changes, and opens a pull request for each.
 
 Usage:
   python CxOne_TR_Demo.py <owner>/<repo>[,<owner>/<repo>,...]
+  python CxOne_TR_Demo.py --delete <owner>/<repo>[,<owner>/<repo>,...]
 
 Examples:
   python CxOne_TR_Demo.py CxRW/my-project
   python CxOne_TR_Demo.py CxRW/repo1,CxRW/repo2,other-org/repo3
+  python CxOne_TR_Demo.py --delete CxRW/my-project
+  python CxOne_TR_Demo.py --delete CxRW/repo1,CxRW/repo2
 
 Requires: gh CLI authenticated (run 'gh auth login' first)
 """
@@ -27,7 +30,8 @@ from pathlib import Path
 
 # ── hardcoded config ──────────────────────────────────────────────────────────
 
-SOURCE_REPO = "CxRW-Templates/ProjectHub-TR"
+SOURCE_REPO        = "CxRW-Templates/ProjectHub-TR"
+REPO_DESCRIPTION   = f"Clone of {SOURCE_REPO}"  # set at creation; used to verify ownership on delete
 BRANCH_NAME = "feat/update-routes"
 PR_TITLE    = "feat: update routes"
 PR_BODY     = "Added admin route and downgraded dependencies for compatibility"
@@ -311,7 +315,7 @@ def create_repo(target_owner: str, repo_name: str, account_type: str) -> None:
     source = gh_api("GET", f"repos/{SOURCE_REPO}")
     body = {
         "name": repo_name,
-        "description": f"Clone of {SOURCE_REPO}",
+        "description": REPO_DESCRIPTION,
         "private": source["private"],
         "auto_init": False,
     }
@@ -384,6 +388,96 @@ def apply_and_pr(target_owner: str, repo_name: str, default_branch: str, workdir
     return pr["html_url"]
 
 
+# ── delete flow ───────────────────────────────────────────────────────────────
+
+def delete_repos(targets: list[tuple[str, str]]) -> int:
+    """Confirm and delete each target repo. Returns exit code."""
+
+    # ── verify each repo exists and check ownership ───────────────────────────
+    print("Checking repos...")
+    verified: list[tuple[str, str, bool]] = []  # (owner, repo, created_by_tool)
+    any_missing = False
+    for target_owner, repo_name in targets:
+        tag = f"[{target_owner}/{repo_name}]"
+        try:
+            info = gh_api("GET", f"repos/{target_owner}/{repo_name}")
+        except RuntimeError:
+            print(f"{tag} Not found — skipping.", file=sys.stderr)
+            any_missing = True
+            continue
+        created_by_tool = info.get("description", "") == REPO_DESCRIPTION
+        if created_by_tool:
+            print(f"{tag} Found. Description matches — created by this tool.")
+        else:
+            actual_desc = info.get("description") or "(no description)"
+            print(f"{tag} Found. Description does NOT match (got: {actual_desc!r}).")
+        verified.append((target_owner, repo_name, created_by_tool))
+
+    if not verified:
+        print("\nNo repos to delete.", file=sys.stderr)
+        return 1
+
+    unrecognized = [(o, r) for o, r, owned in verified if not owned]
+
+    print()
+
+    # ── confirmation prompt ───────────────────────────────────────────────────
+    print("The following repos will be PERMANENTLY DELETED:")
+    for o, r, _ in verified:
+        print(f"  {o}/{r}")
+    print()
+
+    try:
+        reply = input("Confirm deletion? [y/N]: ").strip().lower()
+    except EOFError:
+        reply = "n"
+    if reply not in ("y", "yes"):
+        print("Aborted. No repos were deleted.")
+        return 0
+
+    # ── second confirmation for unrecognized repos ────────────────────────────
+    if unrecognized:
+        print()
+        print("WARNING: the following repos were NOT created by this tool (description mismatch):")
+        for o, r in unrecognized:
+            print(f"  {o}/{r}")
+        print()
+        try:
+            reply2 = input("Delete these unrecognized repos too? [y/N]: ").strip().lower()
+        except EOFError:
+            reply2 = "n"
+        if reply2 not in ("y", "yes"):
+            print("Skipping unrecognized repos.")
+            unrecognized_set = set(unrecognized)
+            verified = [(o, r, owned) for o, r, owned in verified if (o, r) not in unrecognized_set]
+
+    if not verified:
+        print("No repos to delete.")
+        return 0
+
+    # ── delete ────────────────────────────────────────────────────────────────
+    print()
+    failed: list[str] = []
+    for target_owner, repo_name, _ in verified:
+        tag = f"[{target_owner}/{repo_name}]"
+        print(f"{tag} Deleting...")
+        result = subprocess.run(
+            ["gh", "repo", "delete", f"{target_owner}/{repo_name}", "--yes"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            msg = result.stderr.strip() or result.stdout.strip()
+            print(f"{tag} Failed: {msg}", file=sys.stderr)
+            failed.append(f"{target_owner}/{repo_name}")
+        else:
+            print(f"{tag} Deleted.")
+
+    if failed:
+        print(f"\nThe following repos could not be deleted: {', '.join(failed)}", file=sys.stderr)
+        return 1
+    return 0
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def parse_targets(raw: str) -> list[tuple[str, str]]:
@@ -411,6 +505,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Clone ProjectHub-TR into one or more target repos, apply hardcoded changes, and open a PR for each. "
+            "Use --delete to permanently remove repos created by this tool. "
             "Targets are provided as a comma-separated list of <owner>/<repo> pairs."
         )
     )
@@ -419,11 +514,19 @@ def main() -> int:
         metavar="owner/repo[,owner/repo,...]",
         help="One or more target repositories in <owner>/<repo> format, comma-separated (e.g. CxRW/repo1,CxRW/repo2)",
     )
+    parser.add_argument(
+        "--delete",
+        action="store_true",
+        help="Delete the specified repos instead of creating them. Requires confirmation.",
+    )
     args = parser.parse_args()
 
     targets = parse_targets(args.targets)
 
-    username = get_authenticated_username()
+    username = get_authenticated_username()  # also doubles as auth check
+
+    if args.delete:
+        return delete_repos(targets)
 
     # ── preflight: validate all targets before doing any work ────────────────
     print("Running preflight checks...")
