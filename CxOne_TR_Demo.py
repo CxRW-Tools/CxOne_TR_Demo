@@ -392,90 +392,92 @@ def apply_and_pr(target_owner: str, repo_name: str, default_branch: str, workdir
 
 def delete_repos(targets: list[tuple[str, str]]) -> int:
     """Confirm and delete each target repo. Returns exit code."""
-
-    # ── verify each repo exists and check ownership ───────────────────────────
-    print("Checking repos...")
-    verified: list[tuple[str, str, bool]] = []  # (owner, repo, created_by_tool)
-    any_missing = False
-    for target_owner, repo_name in targets:
-        tag = f"[{target_owner}/{repo_name}]"
-        try:
-            info = gh_api("GET", f"repos/{target_owner}/{repo_name}")
-        except RuntimeError:
-            print(f"{tag} Not found — skipping.", file=sys.stderr)
-            any_missing = True
-            continue
-        created_by_tool = info.get("description", "") == REPO_DESCRIPTION
-        if created_by_tool:
-            print(f"{tag} Found. Description matches — created by this tool.")
-        else:
-            actual_desc = info.get("description") or "(no description)"
-            print(f"{tag} Found. Description does NOT match (got: {actual_desc!r}).")
-        verified.append((target_owner, repo_name, created_by_tool))
-
-    if not verified:
-        print("\nNo repos to delete.", file=sys.stderr)
-        return 1
-
-    unrecognized = [(o, r) for o, r, owned in verified if not owned]
-
-    print()
-
-    # ── confirmation prompt ───────────────────────────────────────────────────
-    print("The following repos will be PERMANENTLY DELETED:")
-    for o, r, _ in verified:
-        print(f"  {o}/{r}")
-    print()
-
     try:
-        reply = input("Confirm deletion? [y/N]: ").strip().lower()
-    except EOFError:
-        reply = "n"
-    if reply not in ("y", "yes"):
-        print("Aborted. No repos were deleted.")
-        return 0
+        # ── verify each repo exists and check ownership ───────────────────────
+        print("Checking repos...")
+        verified: list[tuple[str, str, bool]] = []  # (owner, repo, created_by_tool)
+        for target_owner, repo_name in targets:
+            tag = f"[{target_owner}/{repo_name}]"
+            try:
+                info = gh_api("GET", f"repos/{target_owner}/{repo_name}")
+            except RuntimeError:
+                print(f"{tag} Not found — skipping.", file=sys.stderr)
+                continue
+            created_by_tool = info.get("description", "") == REPO_DESCRIPTION
+            if created_by_tool:
+                print(f"{tag} Found. Description matches — created by this tool.")
+            else:
+                actual_desc = info.get("description") or "(no description)"
+                print(f"{tag} Found. Description does NOT match (got: {actual_desc!r}).")
+            verified.append((target_owner, repo_name, created_by_tool))
 
-    # ── second confirmation for unrecognized repos ────────────────────────────
-    if unrecognized:
+        if not verified:
+            print("\nNo repos to delete.", file=sys.stderr)
+            return 1
+
+        unrecognized = [(o, r) for o, r, owned in verified if not owned]
+
         print()
-        print("WARNING: the following repos were NOT created by this tool (description mismatch):")
-        for o, r in unrecognized:
+
+        # ── confirmation prompt ───────────────────────────────────────────────
+        print("The following repos will be PERMANENTLY DELETED:")
+        for o, r, _ in verified:
             print(f"  {o}/{r}")
         print()
-        try:
-            reply2 = input("Delete these unrecognized repos too? [y/N]: ").strip().lower()
-        except EOFError:
-            reply2 = "n"
-        if reply2 not in ("y", "yes"):
-            print("Skipping unrecognized repos.")
-            unrecognized_set = set(unrecognized)
-            verified = [(o, r, owned) for o, r, owned in verified if (o, r) not in unrecognized_set]
 
-    if not verified:
-        print("No repos to delete.")
+        try:
+            reply = input("Confirm deletion? [y/N]: ").strip().lower()
+        except EOFError:
+            reply = "n"
+        if reply not in ("y", "yes"):
+            print("Aborted. No repos were deleted.")
+            return 0
+
+        # ── second confirmation for unrecognized repos ────────────────────────
+        if unrecognized:
+            print()
+            print("WARNING: the following repos were NOT created by this tool (description mismatch):")
+            for o, r in unrecognized:
+                print(f"  {o}/{r}")
+            print()
+            try:
+                reply2 = input("Delete these unrecognized repos too? [y/N]: ").strip().lower()
+            except EOFError:
+                reply2 = "n"
+            if reply2 not in ("y", "yes"):
+                print("Skipping unrecognized repos.")
+                unrecognized_set = set(unrecognized)
+                verified = [(o, r, owned) for o, r, owned in verified if (o, r) not in unrecognized_set]
+
+        if not verified:
+            print("No repos to delete.")
+            return 0
+
+        # ── delete ────────────────────────────────────────────────────────────
+        print()
+        failed: list[str] = []
+        for target_owner, repo_name, _ in verified:
+            tag = f"[{target_owner}/{repo_name}]"
+            print(f"{tag} Deleting...")
+            result = subprocess.run(
+                ["gh", "repo", "delete", f"{target_owner}/{repo_name}", "--yes"],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                msg = result.stderr.strip() or result.stdout.strip()
+                print(f"{tag} Failed: {msg}", file=sys.stderr)
+                failed.append(f"{target_owner}/{repo_name}")
+            else:
+                print(f"{tag} Deleted.")
+
+        if failed:
+            print(f"\nThe following repos could not be deleted: {', '.join(failed)}", file=sys.stderr)
+            return 1
         return 0
 
-    # ── delete ────────────────────────────────────────────────────────────────
-    print()
-    failed: list[str] = []
-    for target_owner, repo_name, _ in verified:
-        tag = f"[{target_owner}/{repo_name}]"
-        print(f"{tag} Deleting...")
-        result = subprocess.run(
-            ["gh", "repo", "delete", f"{target_owner}/{repo_name}", "--yes"],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            msg = result.stderr.strip() or result.stdout.strip()
-            print(f"{tag} Failed: {msg}", file=sys.stderr)
-            failed.append(f"{target_owner}/{repo_name}")
-        else:
-            print(f"{tag} Deleted.")
-
-    if failed:
-        print(f"\nThe following repos could not be deleted: {', '.join(failed)}", file=sys.stderr)
-        return 1
-    return 0
+    except KeyboardInterrupt:
+        print("\nAborted by user.", file=sys.stderr)
+        return 130
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
