@@ -237,9 +237,13 @@ if __name__ == '__main__':
     ),
     "totallysecure": SourceProfile(
         repo="CxRW-Templates/TotallySecure-TR",
-        branch_name="feat/add-code-injection-endpoint",
-        pr_title="feat: add code injection endpoint",
-        pr_body="Added a code injection vulnerability endpoint for the AI Triage & Remediation demo",
+        branch_name="feat/json-string-validator",
+        pr_title="feat: add JSON string validator endpoint",
+        pr_body=(
+            "Adds a lightweight endpoint to check whether a submitted JSON string "
+            "is well-formed before it's used downstream, for pre-flight validation "
+            "in the config import flow."
+        ),
         changes=[
     (
         "src/main/java/org/t246osslab/easybuggy4sb/vulnerabilities/CodeInjectionController.java",
