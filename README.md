@@ -9,7 +9,7 @@ Choose which template to clone with `--source`:
 | `--source` value | Template repo | Demo change |
 | --- | --- | --- |
 | `projecthub` | [CxRW-Templates/ProjectHub-TR](https://github.com/CxRW-Templates/ProjectHub-TR) | Downgrades backend dependencies and adds an admin route |
-| `totallysecure` | [CxRW-Templates/TotallySecure-TR](https://github.com/CxRW-Templates/TotallySecure-TR) | Adds a code-injection vulnerability endpoint |
+| `totallysecure` | [CxRW-Templates/TotallySecure-TR](https://github.com/CxRW-Templates/TotallySecure-TR) | Adds a "JSON string validator" endpoint (framed as a legitimate feature; the implementation is exploitable via script injection) |
 
 If `--source` is omitted, the script prompts you to choose interactively.
 
