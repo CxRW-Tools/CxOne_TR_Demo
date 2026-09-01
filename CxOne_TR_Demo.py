@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-CxOne_TR_Demo: creates one or more copies of CxRW-Templates/ProjectHub-TR in
-target orgs/accounts under the given repo names, pushes their contents, then
-branches, applies hardcoded changes, and opens a pull request for each.
+CxOne_TR_Demo: creates one or more copies of a template repo (see
+SOURCE_PROFILES below) in target orgs/accounts under the given repo names,
+pushes their contents, then branches, applies hardcoded changes, and opens a
+pull request for each.
 
 Usage:
-  python CxOne_TR_Demo.py <owner>/<repo>[,<owner>/<repo>,...]
+  python CxOne_TR_Demo.py [--source <name>] <owner>/<repo>[,<owner>/<repo>,...]
   python CxOne_TR_Demo.py --delete <owner>/<repo>[,<owner>/<repo>,...]
 
 Examples:
   python CxOne_TR_Demo.py CxRW/my-project
+  python CxOne_TR_Demo.py --source totallysecure CxRW/my-project
   python CxOne_TR_Demo.py CxRW/repo1,CxRW/repo2,other-org/repo3
   python CxOne_TR_Demo.py --delete CxRW/my-project
   python CxOne_TR_Demo.py --delete CxRW/repo1,CxRW/repo2
+
+If --source is omitted, the script prompts for which template to use.
 
 Requires: gh CLI authenticated (run 'gh auth login' first)
 """
@@ -26,18 +30,35 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 # ── hardcoded config ──────────────────────────────────────────────────────────
 
-SOURCE_REPO        = "CxRW-Templates/ProjectHub-TR"
-REPO_DESCRIPTION   = f"Clone of {SOURCE_REPO}"  # set at creation; used to verify ownership on delete
-BRANCH_NAME = "feat/update-routes"
-PR_TITLE    = "feat: update routes"
-PR_BODY     = "Added admin route and downgraded dependencies for compatibility"
 
-# Each entry: (path_in_repo, file_content_to_write)
-CHANGES: list[tuple[str, str]] = [
+@dataclass(frozen=True)
+class SourceProfile:
+    """A template repo to clone, plus the demo changes to apply on top of it."""
+
+    repo: str
+    branch_name: str
+    pr_title: str
+    pr_body: str
+    changes: list[tuple[str, str]]  # (path_in_repo, file_content_to_write)
+
+    @property
+    def description(self) -> str:
+        """Set as the created repo's description; used to verify ownership on delete."""
+        return f"Clone of {self.repo}"
+
+
+SOURCE_PROFILES: dict[str, SourceProfile] = {
+    "projecthub": SourceProfile(
+        repo="CxRW-Templates/ProjectHub-TR",
+        branch_name="feat/update-routes",
+        pr_title="feat: update routes",
+        pr_body="Added admin route and downgraded dependencies for compatibility",
+        changes=[
     (
         "backend/requirements.txt",
         """\
@@ -212,9 +233,84 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
 """,
     ),
-]
+        ],
+    ),
+    "totallysecure": SourceProfile(
+        repo="CxRW-Templates/TotallySecure-TR",
+        branch_name="feat/add-code-injection-endpoint",
+        pr_title="feat: add code injection endpoint",
+        pr_body="Added a code injection vulnerability endpoint for the AI Triage & Remediation demo",
+        changes=[
+    (
+        "src/main/java/org/t246osslab/easybuggy4sb/vulnerabilities/CodeInjectionController.java",
+        """\
+package org.t246osslab.easybuggy4sb.vulnerabilities;
+
+import java.util.Locale;
+
+import javax.script.ScriptEngine;
+import javax.script.ScriptEngineManager;
+import javax.script.ScriptException;
+
+import org.apache.commons.lang.StringUtils;
+import org.springframework.stereotype.Controller;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.servlet.ModelAndView;
+import org.t246osslab.easybuggy4sb.Config;
+import org.t246osslab.easybuggy4sb.controller.AbstractController;
+
+@Controller
+public class CodeInjectionController extends AbstractController {
+
+	@RequestMapping(value = Config.APP_ROOT + "/codeijc")
+	public ModelAndView process(@RequestParam(value = "jsonString", required = false) String jsonString,
+			ModelAndView mav, Locale locale) {
+		setViewAndCommonObjects(mav, locale, "codeinjection");
+        if (!StringUtils.isBlank(jsonString)) {
+            parseJson(jsonString, mav, locale);
+        } else {
+            mav.addObject("msg", msg.getMessage("msg.enter.json.string", null, locale));
+        }
+		return mav;
+	}
+
+    private void parseJson(String jsonString, ModelAndView mav, Locale locale) {
+        /* Remove spaces and line breaks to parse as JSON */
+        String convertedJsonString = jsonString.replaceAll(" ", "");
+        convertedJsonString = convertedJsonString.replaceAll("\\r\\n", "");
+        convertedJsonString = convertedJsonString.replaceAll("\\n", "");
+        try {
+            /* Parse the input string as JSON */
+        	ScriptEngineManager manager = new ScriptEngineManager();
+        	ScriptEngine scriptEngine = manager.getEngineByName("JavaScript");
+        	scriptEngine.eval("JSON.parse('" + convertedJsonString + "')");
+        	mav.addObject("msg", msg.getMessage("msg.valid.json", null, locale));
+        } catch (ScriptException e) {
+        	mav.addObject("errmsg", msg.getMessage("msg.invalid.json",
+        			new String[] { e.getMessage() }, null, locale));
+        } catch (Exception e) {
+        	log.error("Exception occurs: ", e);
+        	mav.addObject("errmsg", msg.getMessage("msg.invalid.json",
+        			new String[] { e.getMessage() }, null, locale));
+        }
+    }
+}
+""",
+    ),
+        ],
+    ),
+}
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+class GhApiError(RuntimeError):
+    """Raised by gh_api on a non-2xx response. Carries the HTTP status when known."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
 
 def gh_api(method: str, endpoint: str, body: dict | None = None) -> dict:
     cmd = ["gh", "api", "-X", method, endpoint]
@@ -226,6 +322,8 @@ def gh_api(method: str, endpoint: str, body: dict | None = None) -> dict:
     if r.returncode != 0:
         # Try to extract a human-readable message from the JSON error body
         detail = r.stderr.strip()
+        status_match = re.search(r"\(HTTP (\d+)\)", detail)
+        status = int(status_match.group(1)) if status_match else None
         try:
             err = json.loads(r.stdout)
             msg = err.get("message", "")
@@ -238,7 +336,7 @@ def gh_api(method: str, endpoint: str, body: dict | None = None) -> dict:
                 detail = msg
         except (json.JSONDecodeError, AttributeError):
             pass
-        raise RuntimeError(detail)
+        raise GhApiError(detail, status=status)
     return json.loads(r.stdout) if r.stdout.strip() else {}
 
 
@@ -275,8 +373,11 @@ def get_account_type(target_owner: str) -> str:
     """Return 'User' or 'Organization' for the given GitHub account name."""
     try:
         account = gh_api("GET", f"users/{target_owner}")
-    except RuntimeError:
-        print(f"Error: GitHub account '{target_owner}' not found.", file=sys.stderr)
+    except GhApiError as e:
+        if e.status == 404:
+            print(f"Error: GitHub account '{target_owner}' not found.", file=sys.stderr)
+        else:
+            print(f"Error: could not look up account '{target_owner}': {e}", file=sys.stderr)
         sys.exit(1)
     return account.get("type", "Organization")
 
@@ -285,8 +386,11 @@ def check_repo_does_not_exist(target_owner: str, repo_name: str) -> None:
     """Exit if the target repo already exists, to avoid a cryptic failure mid-run."""
     try:
         gh_api("GET", f"repos/{target_owner}/{repo_name}")
-    except RuntimeError:
-        return  # repo doesn't exist — good
+    except GhApiError as e:
+        if e.status == 404:
+            return  # repo doesn't exist — good
+        print(f"Error: could not verify whether '{target_owner}/{repo_name}' exists: {e}", file=sys.stderr)
+        sys.exit(1)
     print(f"Error: '{target_owner}/{repo_name}' already exists. Pick a different name or delete the existing repo first.", file=sys.stderr)
     sys.exit(1)
 
@@ -311,11 +415,11 @@ def check_org_access(target_owner: str, account_type: str, username: str) -> Non
 
 # ── core steps ────────────────────────────────────────────────────────────────
 
-def create_repo(target_owner: str, repo_name: str, account_type: str) -> None:
-    source = gh_api("GET", f"repos/{SOURCE_REPO}")
+def create_repo(target_owner: str, repo_name: str, account_type: str, profile: SourceProfile) -> None:
+    source = gh_api("GET", f"repos/{profile.repo}")
     body = {
         "name": repo_name,
-        "description": REPO_DESCRIPTION,
+        "description": profile.description,
         "private": source["private"],
         "auto_init": False,
     }
@@ -326,9 +430,9 @@ def create_repo(target_owner: str, repo_name: str, account_type: str) -> None:
     print(f"  Created repo: {target_owner}/{repo_name}")
 
 
-def clone_and_push(target_owner: str, repo_name: str, workdir: Path) -> str:
+def clone_and_push(target_owner: str, repo_name: str, workdir: Path, profile: SourceProfile) -> str:
     """Clone source into workdir and push to the new repo. Returns default branch name."""
-    run_gh("repo", "clone", SOURCE_REPO, ".", "--", "--depth", "1", cwd=workdir)
+    run_gh("repo", "clone", profile.repo, ".", "--", "--depth", "1", cwd=workdir)
 
     run_git(workdir, "fetch", "origin", "--unshallow")
     default_branch = run_git(workdir, "rev-parse", "--abbrev-ref", "origin/HEAD").stdout.strip()
@@ -349,7 +453,7 @@ def clone_and_push(target_owner: str, repo_name: str, workdir: Path) -> str:
     return default_branch
 
 
-def apply_and_pr(target_owner: str, repo_name: str, default_branch: str, workdir: Path) -> str | None:
+def apply_and_pr(target_owner: str, repo_name: str, default_branch: str, workdir: Path, profile: SourceProfile) -> str | None:
     """Create branch, write hardcoded changes, commit, push, open PR. Returns PR URL or None."""
     url = f"https://github.com/{target_owner}/{repo_name}.git"
 
@@ -359,11 +463,11 @@ def apply_and_pr(target_owner: str, repo_name: str, default_branch: str, workdir
 
     run_git(workdir, "remote", "add", "target", url)
     run_git(workdir, "fetch", "target")
-    run_git(workdir, "checkout", "-B", BRANCH_NAME, f"target/{default_branch}")
+    run_git(workdir, "checkout", "-B", profile.branch_name, f"target/{default_branch}")
     run_git(workdir, "remote", "remove", "target")
-    print(f"  Creating branch {BRANCH_NAME}")
+    print(f"  Creating branch {profile.branch_name}")
 
-    for repo_path, content in CHANGES:
+    for repo_path, content in profile.changes:
         print(f"  Updating {repo_path}")
         dest = workdir / repo_path
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -374,15 +478,15 @@ def apply_and_pr(target_owner: str, repo_name: str, default_branch: str, workdir
     if diff.returncode == 0:
         return None  # nothing changed
 
-    run_git(workdir, "commit", "-m", PR_TITLE)
+    run_git(workdir, "commit", "-m", profile.pr_title)
     run_git(workdir, "remote", "add", "target", url)
-    run_git(workdir, "push", "target", BRANCH_NAME)
+    run_git(workdir, "push", "target", profile.branch_name)
     run_git(workdir, "remote", "remove", "target")
 
     pr = gh_api("POST", f"repos/{target_owner}/{repo_name}/pulls", body={
-        "title": PR_TITLE,
-        "body": PR_BODY,
-        "head": BRANCH_NAME,
+        "title": profile.pr_title,
+        "body": profile.pr_body,
+        "head": profile.branch_name,
         "base": default_branch,
     })
     return pr["html_url"]
@@ -403,7 +507,8 @@ def delete_repos(targets: list[tuple[str, str]]) -> int:
             except RuntimeError:
                 print(f"{tag} Not found — skipping.", file=sys.stderr)
                 continue
-            created_by_tool = info.get("description", "") == REPO_DESCRIPTION
+            known_descriptions = {p.description for p in SOURCE_PROFILES.values()}
+            created_by_tool = info.get("description", "") in known_descriptions
             if created_by_tool:
                 print(f"{tag} Found. Description matches — created by this tool.")
             else:
@@ -503,10 +608,28 @@ def parse_targets(raw: str) -> list[tuple[str, str]]:
     return targets
 
 
+def prompt_source_choice() -> SourceProfile:
+    """Ask the user which source profile to use when --source wasn't given."""
+    keys = list(SOURCE_PROFILES)
+    print("Which source repo do you want to use as the template?")
+    for i, key in enumerate(keys, start=1):
+        print(f"  {i}) {key} — {SOURCE_PROFILES[key].repo}")
+    print()
+    while True:
+        try:
+            reply = input(f"Select [1-{len(keys)}]: ").strip()
+        except EOFError:
+            print("Error: no --source given and input is not interactive.", file=sys.stderr)
+            sys.exit(1)
+        if reply.isdigit() and 1 <= int(reply) <= len(keys):
+            return SOURCE_PROFILES[keys[int(reply) - 1]]
+        print(f"Invalid selection: {reply!r}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Clone ProjectHub-TR into one or more target repos, apply hardcoded changes, and open a PR for each. "
+            "Clone a template repo into one or more target repos, apply hardcoded changes, and open a PR for each. "
             "Use --delete to permanently remove repos created by this tool. "
             "Targets are provided as a comma-separated list of <owner>/<repo> pairs."
         )
@@ -515,6 +638,15 @@ def main() -> int:
         "targets",
         metavar="owner/repo[,owner/repo,...]",
         help="One or more target repositories in <owner>/<repo> format, comma-separated (e.g. CxRW/repo1,CxRW/repo2)",
+    )
+    parser.add_argument(
+        "--source",
+        choices=list(SOURCE_PROFILES),
+        help=(
+            "Template repo to use: "
+            + ", ".join(f"{key}={profile.repo}" for key, profile in SOURCE_PROFILES.items())
+            + ". Prompted if omitted. Ignored with --delete."
+        ),
     )
     parser.add_argument(
         "--delete",
@@ -530,6 +662,9 @@ def main() -> int:
     if args.delete:
         return delete_repos(targets)
 
+    profile = SOURCE_PROFILES[args.source] if args.source else prompt_source_choice()
+    print()
+
     # ── preflight: validate all targets before doing any work ────────────────
     print("Running preflight checks...")
     account_types: dict[tuple[str, str], str] = {}
@@ -541,10 +676,10 @@ def main() -> int:
     print("  All targets OK.")
     print()
 
-    print(f"Source:   {SOURCE_REPO}")
+    print(f"Source:   {profile.repo}")
     print(f"Targets:  {', '.join(f'{o}/{r}' for o, r in targets)}")
-    print(f"Branch:   {BRANCH_NAME}")
-    print(f"PR:       {PR_TITLE!r}")
+    print(f"Branch:   {profile.branch_name}")
+    print(f"PR:       {profile.pr_title!r}")
     print()
 
     created_repos: list[str] = []
@@ -557,13 +692,13 @@ def main() -> int:
             account_type = account_types[(target_owner, repo_name)]
 
             print(f"{tag} Creating repo...")
-            create_repo(target_owner, repo_name, account_type)
+            create_repo(target_owner, repo_name, account_type, profile)
             created_repos.append(f"{target_owner}/{repo_name}")
 
             with tempfile.TemporaryDirectory() as tmp:
                 workdir = Path(tmp)
                 print(f"{tag} Cloning source and pushing to target repo...")
-                default_branch = clone_and_push(target_owner, repo_name, workdir)
+                default_branch = clone_and_push(target_owner, repo_name, workdir, profile)
                 default_branches[(target_owner, repo_name)] = default_branch
                 print(f"{tag} Default branch: {default_branch}")
             print()
@@ -602,9 +737,9 @@ def main() -> int:
             print(f"\n{tag} Applying changes...")
             with tempfile.TemporaryDirectory() as tmp:
                 workdir = Path(tmp)
-                run_gh("repo", "clone", SOURCE_REPO, ".", "--", "--depth", "1", cwd=workdir)
+                run_gh("repo", "clone", profile.repo, ".", "--", "--depth", "1", cwd=workdir)
                 run_git(workdir, "fetch", "origin", "--unshallow")
-                pr_url = apply_and_pr(target_owner, repo_name, default_branch, workdir)
+                pr_url = apply_and_pr(target_owner, repo_name, default_branch, workdir, profile)
             pr_urls.append((f"{target_owner}/{repo_name}", pr_url))
 
         print()
